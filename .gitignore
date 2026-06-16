@@ -1,0 +1,6 @@
+serviceAccountKey.json
+audio_files/
+recordings/
+__pycache__/
+*.pyc
+.env
