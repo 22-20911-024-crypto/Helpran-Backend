@@ -27,7 +27,7 @@ if sys.platform == "win32":
 PASS_SCORE = 70
 AUDIO_FOLDER = "audio_files"
 RECORDINGS_FOLDER = "recordings"
-WHISPER_SIZE = "small"
+WHISPER_SIZE = "base"
 
 VOICES = {
     "english": "en-US-AriaNeural",
