@@ -15,7 +15,7 @@ import asyncio
 import edge_tts
 from faster_whisper import WhisperModel
 from difflib import SequenceMatcher
-from sentence_transformers import SentenceTransformer, util
+# sentence_transformers removed to prevent out-of-memory crashes on Railway
 
 # Windows fix
 if sys.platform == "win32":
@@ -55,12 +55,8 @@ print("Whisper ready! ✅")
 _semantic_model = None
 
 def _get_semantic_model():
-    global _semantic_model
-    if _semantic_model is None:
-        print("🧠 Loading semantic model (first time may take a minute)...")
-        _semantic_model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
-        print("✅ Semantic model ready")
-    return _semantic_model
+    # Disabled to save memory on Railway free tier
+    return None
 
 # =============================================
 # KNOWLEDGE BASE (UPDATED GROUPS)
@@ -249,9 +245,34 @@ def _fix_whisper_output(heard, expected):
     heard = heard.strip()
     low = heard.lower().strip()
     fixes = {
-        "go":"cow","ko":"cow","kow":"cow","got":"goat","god":"goat","gote":"goat",
-        "kat":"cat","cot":"cat","dok":"dog","doc":"dog","dawg":"dog",
-        "fis":"fish","wish":"fish","burd":"bird","berd":"bird","han":"hen"
+        # Animals
+        "go":"cow","ko":"cow","kow":"cow","gao":"cow","gow":"cow","how":"cow",
+        "got":"goat","god":"goat","gote":"goat",
+        "kat":"cat","cot":"cat","get":"cat","cut":"cat","gat":"cat","kit":"cat","cap":"cat",
+        "dok":"dog","doc":"dog","dawg":"dog","dag":"dog",
+        "fis":"fish","wish":"fish","dish":"fish",
+        "burd":"bird","berd":"bird","beard":"bird","wird":"bird","word":"bird",
+        "han":"hen","han":"hen","pen":"hen","when":"hen","then":"hen",
+        # Emotions / descriptions
+        "hapi":"happy","happi":"happy","hepy":"happy",
+        "sat":"sad","said":"sad",
+        "angri":"angry","hungry":"angry",
+        "read":"red","rid":"red","bed":"red",
+        "bloo":"blue","blow":"blue","blew":"blue",
+        "grin":"green","greet":"green","grain":"green",
+        # Body parts
+        "i":"eye","ay":"eye","aye":"eye",
+        "here":"ear","year":"ear","are":"ear",
+        "noze":"nose","nos":"nose","knows":"nose",
+        "han":"hand","and":"hand","sand":"hand",
+        "had":"head","hed":"head",
+        # Other common words
+        "vader":"water","wader":"water","waiter":"water",
+        "good":"food","foot":"food","flood":"food",
+        "kelp":"help","held":"help","hell":"help",
+        "yeah":"yes","yeas":"yes",
+        "know":"no","now":"no","nope":"no",
+        "shop":"stop","top":"stop","step":"stop",
     }
     if low in fixes:
         fixed = fixes[low]
@@ -280,6 +301,36 @@ def _get_group(w, groups):
 def _get_key_words(text, lang):
     stop = STOP_WORDS_UR if lang in ('ur','urdu') else STOP_WORDS_EN
     return [w for w in text.split() if w not in stop and len(w)>1]
+
+# Groups of starting sounds that children commonly mix up due to accent
+# (these are TRUE accent confusions, not different words)
+FIRST_SOUND_GROUPS = [
+    {'c','k','q'},
+    {'b','v'},
+    {'d','t'},
+    {'p','f'},
+    {'g','j'},
+    {'s','z'},
+    {'w','v'},
+]
+
+def _first_sound_compatible(exp_word, hrd_word):
+    """
+    Checks if two words could plausibly be the same word said with an
+    accent, based on their starting sound. Returns False if the words
+    start with sounds that are NOT typically confused (e.g. 'c' vs 'h'),
+    which usually means a genuinely different word was said
+    (e.g. expected 'cat', heard 'hat').
+    """
+    if not exp_word or not hrd_word:
+        return False
+    e, h = exp_word[0].lower(), hrd_word[0].lower()
+    if e == h:
+        return True
+    for group in FIRST_SOUND_GROUPS:
+        if e in group and h in group:
+            return True
+    return False
 
 # =============================================
 # PRONOUN MISMATCH DETECTION
@@ -344,8 +395,18 @@ def _rule_based_score(expected, heard, lang):
     if not exp_kw:
         return 80.0
     if len(exp_kw)==1 and len(hrd_kw)==1:
-        # Pronunciation leniency for single words (Cow -> Go)
-        r = SequenceMatcher(None, exp_kw[0], hrd_kw[0]).ratio()
+        # Pronunciation leniency for single words (Cow -> Go, handled by
+        # the whisper-fix dictionary earlier) but reject words that only
+        # share letters by coincidence (Cat -> Hat, Bat, Mat).
+        exp_w = exp_kw[0]
+        hrd_w = hrd_kw[0]
+        r = SequenceMatcher(None, exp_w, hrd_w).ratio()
+
+        if re.match(r'^[a-z]+$', exp_w) and re.match(r'^[a-z]+$', hrd_w):
+            if not _first_sound_compatible(exp_w, hrd_w):
+                print(f"❌ Different word detected: '{exp_w}' vs '{hrd_w}' (starting sound mismatch)")
+                return 30.0
+
         if r>=0.85: return 100.0
         if r>=0.70: return 85.0
         if r>=0.55: return 70.0
@@ -433,17 +494,7 @@ def _smart_score(expected: str, heard: str, lang: str = "en") -> float:
         rule_score = _rule_based_score(expected, heard, lang)
         return min(95.0, max(75.0, rule_score))
 
-    # ----- SINGLE WORD : lenient (use rule‑based + semantic override) -----
+    # ----- SINGLE WORD : lenient (rule-based only, semantic check disabled) -----
     else:
         rule_score = _rule_based_score(expected, heard, lang)
-        if rule_score < 50:
-            return rule_score
-        # Apply semantic safety net (only for single words)
-        model = _get_semantic_model()
-        emb1 = model.encode(expected, convert_to_tensor=True)
-        emb2 = model.encode(heard, convert_to_tensor=True)
-        similarity = util.cos_sim(emb1, emb2).item() * 100
-        if similarity < 50:
-            print(f"⚠️ Semantic override (single word): {similarity:.0f} → capping at 45")
-            return min(rule_score, 45.0)
         return rule_score

@@ -4,4 +4,3 @@ python-multipart
 firebase-admin
 edge-tts
 faster-whisper
-sentence-transformers
